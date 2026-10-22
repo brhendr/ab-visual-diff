@@ -1,0 +1,40 @@
+name: Scan website for visual variants
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Public HTTPS URL to scan'
+        required: true
+        default: 'https://example.com'
+        type: string
+      visits:
+        description: 'Independent visits (2-12)'
+        required: true
+        default: '6'
+        type: choice
+        options: ['2','4','6','8','10','12']
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SCAN_URL: ${{ inputs.url }}
+      SCAN_VISITS: ${{ inputs.visits }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/scan-action.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: variant-hunter-report
+          path: report/
+          retention-days: 7
