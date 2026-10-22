@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Variant Hunter · Visual A/B Test Detector</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#e6e9f1;background:#0c111c}
+*{box-sizing:border-box}body{margin:0}main{max-width:1180px;margin:0 auto;padding:36px 22px}
+h1{font-size:clamp(28px,4vw,46px);letter-spacing:-.04em;margin:0}p{color:#98a4b8;line-height:1.5}
+header{margin-bottom:26px}.eyebrow{color:#72d8b3;text-transform:uppercase;font-size:12px;letter-spacing:.17em;font-weight:700}
+.panel{background:#171f2e;border:1px solid #2b384d;border-radius:15px;padding:20px;margin-bottom:24px}
+form{display:grid;grid-template-columns:2fr repeat(3,minmax(90px,1fr)) auto;gap:12px;align-items:end}
+label{font-size:12px;color:#aab8cc;display:flex;flex-direction:column;gap:7px}input{width:100%;padding:12px;border:1px solid #334258;border-radius:9px;background:#0e1624;color:#f6f8fb;font-size:14px}
+button{border:0;background:#70e5b4;color:#11221b;border-radius:9px;font-weight:750;padding:13px 18px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}
+#notice{min-height:25px;margin-top:12px;font-size:13px;color:#b3c5dc}
+.summary{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-bottom:16px}.pill{padding:6px 10px;border-radius:18px;background:#24334a;color:#c1d2e8;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}.capture{border:1px solid #2d3c51;background:#172131;border-radius:12px;overflow:hidden}.capture .info{padding:14px}.capture h3{margin:0 0 6px;font-size:16px}.capture small{color:#9eafc6}
+.viewer{position:relative;background:white;aspect-ratio:16/10;overflow:hidden;cursor:pointer}.viewer img{width:100%;height:100%;object-fit:fill;display:block}.viewer .overlay{position:absolute;inset:0;pointer-events:none}
+.capture button{background:#283950;color:#e4ebf5;font-size:12px;padding:8px 12px;margin-top:10px}
+details{margin-top:20px;color:#a8b9cc}code{color:#d2e6fe}@media(max-width:780px){form{grid-template-columns:1fr 1fr}form label:first-child{grid-column:span 2}form button{grid-column:span 2}}
+</style></head><body><main>
+<header><div class="eyebrow">Experimental · v0.1</div><h1>Variant Hunter</h1><p>Spot unseen A/B tests by reopening a URL in fresh browser sessions and comparing the pixels. Each visit starts with no cookies or local storage.</p></header>
+<section class="panel"><form id="form">
+<label>Website URL<input id="url" type="url" required placeholder="https://example.com" value="https://example.com"></label>
+<label>Visits<input id="visits" type="number" min="2" max="12" value="6"></label>
+<label>Viewport width<input id="width" type="number" min="375" max="1600" value="1280"></label>
+<label>Settle (ms)<input id="wait" type="number" min="0" max="5000" value="1500"></label>
+<button id="submit">Scan visits →</button></form><div id="notice">Ready. Each visit uses an isolated Chromium browser context.</div></section>
+<section id="results"></section>
+<details><summary>How to interpret results & limitations</summary>
+<p>Every screenshot is compared against visit 1. Red areas highlight pixels with a large RGB change. Animations, personalized content, cookie banners, timestamps and loading variance can create false positives. This is a visual discovery demo, not statistical proof of an A/B test. Real sites may block automated browsers; scans are sequential and capped at 12 visits.</p>
+</details></main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=x=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+$("form").addEventListener("submit", async e=>{
+ e.preventDefault();$("submit").disabled=true;$("notice").textContent="Launching fresh browser sessions and comparing screenshots…";$("results").innerHTML="";
+ try{
+  const key=localStorage.getItem("variant-hunter-token")||"";
+  const r=await fetch("/api/scan",{method:"POST",headers:{"content-type":"application/json","x-demo-token":key},
+   body:JSON.stringify({url:$("url").value,visits:$("visits").value,width:$("width").value,waitMs:$("wait").value})});
+  if(r.status===401){const t=prompt("Demo access token:");if(t!==null)localStorage.setItem("variant-hunter-token",t);throw Error("Access token saved. Run the scan again.");}
+  const data=await r.json();if(!r.ok)throw Error(data.error||"Scan failed");
+  const differs=data.comparisons.filter(x=>x.differencePercent>1).length;
+  $("notice").textContent="Scan complete. "+data.comparisons.length+" captures; "+differs+" differ from the first by more than 1%.";
+  $("results").innerHTML='<div class="summary"><h2>Visual comparisons</h2><span class="pill">Baseline: visit 1</span><span class="pill">'+esc(data.width)+' × '+esc(data.height)+'</span></div><div class="grid">'+
+   data.comparisons.map(x=>'<article class="capture"><div class="viewer"><img src="'+x.screenshot+'" alt="Screenshot visit '+x.visit+'"><img class="overlay" style="display:none" src="'+x.diff+'" alt="Difference overlay"></div><div class="info"><h3>Visit '+x.visit+' · '+x.differencePercent+'% changed</h3><small>'+x.ms+' ms · '+esc(x.url)+'</small><div><button type="button" class="toggle">Toggle red difference overlay</button></div></div></article>').join("")+'</div>'+
+   (data.errors.length?'<p>Failed visits: '+data.errors.map(x=>esc(x.visit+": "+x.error)).join("; ")+'</p>':"");
+  document.querySelectorAll(".toggle").forEach(b=>b.addEventListener("click",()=>{const img=b.closest(".capture").querySelector(".overlay");img.style.display=img.style.display==="none"?"block":"none";}));
+ }catch(err){$("notice").textContent="Error: "+err.message;}
+ finally{$("submit").disabled=false;}
+});
+</script></body></html>
