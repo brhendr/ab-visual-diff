@@ -34,7 +34,41 @@ def digest(image):
 def hamming(a,b):
     return sum(x!=y for x,y in zip(a,b))
 
-def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_animations,ignore_media,scroll):
+CONSENT_CSS = """
+#onetrust-consent-sdk, #onetrust-banner-sdk, #onetrust-pc-sdk,
+#CybotCookiebotDialog, #CookiebotWidget, .cky-consent-container,
+#didomi-host, #usercentrics-root, [id*="cookie-banner" i],
+[class*="cookie-consent" i], [aria-label*="cookie consent" i] {
+  visibility: hidden !important;
+}
+"""
+
+def normalize_consent(page, mode, custom_selector):
+    result = {'mode': mode, 'action': 'none'}
+    if mode == 'Accept (click button)':
+        # A real click sets consent and allows gated tags to execute.
+        names = ['Accept All Cookies', 'Accept All', 'Accept all cookies',
+                 'Allow all', 'I Accept', 'Agree and close']
+        for frame in page.frames:
+            for name in names:
+                try:
+                    target = frame.get_by_role('button', name=name, exact=True).first
+                    if target.count() and target.is_visible():
+                        target.click(timeout=1800)
+                        result['action'] = 'clicked: ' + name
+                        return result
+                except Exception:
+                    pass
+        result['action'] = 'no matching accept button'
+    elif mode == 'Hide visually (no consent)':
+        css = CONSENT_CSS
+        if custom_selector.strip():
+            css += "\\n" + custom_selector.strip() + " { visibility: hidden !important; }"
+        page.add_style_tag(content=css)
+        result['action'] = 'hidden visually only'
+    return result
+
+def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_animations,ignore_media,scroll,consent_mode,consent_selector):
     ctx=browser.new_context(viewport={'width':width,'height':height},device_scale_factor=1,
                             locale='en-US',color_scheme='light',reduced_motion='reduce')
     page=ctx.new_page()
@@ -42,6 +76,8 @@ def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_ani
     try:
         response=page.goto(url,wait_until='domcontentloaded',timeout=30000)
         item['status']=response.status if response else None
+        page.wait_for_timeout(900)
+        item['consent']=normalize_consent(page,consent_mode,consent_selector)
         if scroll:
             page.evaluate('window.scrollTo(0,document.body.scrollHeight)')
             page.wait_for_timeout(600)
@@ -60,6 +96,12 @@ def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_ani
             """)
         item['final_url']=page.url
         item['title']=page.title()
+        item['cookies_count']=len(ctx.cookies())
+        item['storage_keys']=page.evaluate("""() => {
+            try { return Object.keys(localStorage).slice(0,100) }
+            catch (_) { return [] }
+        }""")
+        item['document_height']=page.evaluate('document.documentElement.scrollHeight')
         item['elements']=page.evaluate(DOM_CAPTURE)
         item['framework_hints']=page.evaluate("""() => ({
             Optimizely:!!window.optimizely,
@@ -88,7 +130,7 @@ def cluster(visits,threshold):
         else:groups.append([visit])
     return sorted(groups,key=len,reverse=True)
 
-def run_scan(url,n,width,height,delay,full_page,animations,ignore_media,scroll,threshold,headless,restart):
+def run_scan(url,n,width,height,delay,full_page,animations,ignore_media,scroll,threshold,headless,restart,consent_mode,consent_selector):
     folder=RUNS/datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     folder.mkdir(parents=True,exist_ok=True)
     progress=st.progress(0)
@@ -102,7 +144,7 @@ def run_scan(url,n,width,height,delay,full_page,animations,ignore_media,scroll,t
                 message.write(f'Visit {index} of {n}…')
                 if restart:browser=playwright.chromium.launch(headless=headless)
                 try:
-                    visits.append(scan_visit(browser,url,index,folder,width,height,delay,full_page,animations,ignore_media,scroll))
+                    visits.append(scan_visit(browser,url,index,folder,width,height,delay,full_page,animations,ignore_media,scroll,consent_mode,consent_selector))
                 finally:
                     if restart:
                         browser.close()
@@ -113,7 +155,7 @@ def run_scan(url,n,width,height,delay,full_page,animations,ignore_media,scroll,t
     groups=cluster(visits,threshold)
     report={'format_version':3,'url':url,'created_at':datetime.now(timezone.utc).isoformat(),
             'settings':{'visits':n,'viewport':[width,height],'settle_seconds':delay,'full_page':full_page,
-                        'hash_threshold':threshold,'scroll_trigger':scroll,'ignore_moving_media':ignore_media,'restart_browser_per_visit':restart},
+                        'hash_threshold':threshold,'consent_mode':consent_mode,'consent_selector':consent_selector,'scroll_trigger':scroll,'ignore_moving_media':ignore_media,'restart_browser_per_visit':restart},
             'visits':visits,'groups':[[v['visit'] for v in g] for g in groups],
             'dom_comparisons':summarize_groups([[v['visit'] for v in g] for g in groups],{v['visit']:v for v in visits})}
     (folder/'report.json').write_text(json.dumps(report,indent=2))
@@ -133,7 +175,13 @@ with st.sidebar:
     animations=st.checkbox('Disable CSS animations',value=True)
     ignore_media=st.checkbox('Exclude videos and animated GIFs',value=True,
         help='Pause and hide HTML video and GIFs without changing their layout. Canvas animations and embedded video frames may remain.')
-    threshold=st.slider('Group similar images (hash distance)',0,80,15)
+    consent_mode=st.selectbox('Consent banner',[
+        'Hide visually (no consent)', 'Accept (click button)', 'Leave unchanged'
+    ],help='Hiding only affects screenshots. Accept actually clicks consent, when recognizable.')
+    consent_selector=st.text_input('Optional consent CSS selector to hide',
+        help='Example: #my-cookie-banner. Only used in Hide visually mode.')
+    threshold=st.slider('Group similar images (hash distance)',0,80,5,
+        help='Lower values keep subtle differences separate. Zero requires identical perceptual hashes.')
     restart=st.checkbox('Restart Chromium for every visit',value=False,
         help='Every visit already has fresh cookies and site storage. This additionally restarts the browser process.')
     headless=st.checkbox('Run browser in background',value=True)
@@ -142,7 +190,7 @@ with st.sidebar:
 if run:
     try:
         with st.spinner('Scanning…'):
-            folder=run_scan(validate_url(raw),visits,int(width),int(height),wait,full,animations,ignore_media,scroll,threshold,headless,restart)
+            folder=run_scan(validate_url(raw),visits,int(width),int(height),wait,full,animations,ignore_media,scroll,threshold,headless,restart,consent_mode,consent_selector)
         st.session_state['last_folder']=str(folder)
     except Exception as error:st.error(f'Scan failed: {error}')
 
@@ -179,6 +227,26 @@ elif len(groups)==1:st.success('One visual group found. This does not rule out a
 else:st.warning('Multiple visual groups detected. Check for experiments versus dynamic page content.')
 for v in items:
     if v.get('error'):st.caption(f"Visit {v['visit']}: {v['error']}")
+
+st.subheader('Visit diagnostics')
+st.caption('Each captured visit is shown independently, even when grouped with other screenshots. Grouping cannot discard a capture.')
+show_all=st.checkbox('Show screenshots for every visit',value=True)
+if show_all:
+    for start in range(0,len(valid),4):
+        cols=st.columns(4)
+        for col,v in zip(cols,valid[start:start+4]):
+            with col:
+                st.image(str(folder/v['image']),use_container_width=True)
+                st.caption(f"Visit {v['visit']} · HTTP {v.get('status')} · "
+                           f"{v.get('cookies_count','?')} cookies · "
+                           f"Consent: {v.get('consent',{}).get('action','not recorded')}")
+with st.expander('Raw visit details (assignment and targeting clues)'):
+    st.json([{'visit':v['visit'],'http_status':v.get('status'),
+              'final_url':v.get('final_url'),'cookies_count':v.get('cookies_count'),
+              'storage_keys':v.get('storage_keys'),
+              'consent':v.get('consent'),
+              'framework_hints':v.get('framework_hints'),
+              'error':v.get('error')} for v in items],expanded=False)
 
 st.subheader('Visual groups')
 if groups:
