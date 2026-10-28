@@ -41,4 +41,4 @@ python -m streamlit run app.py
 
 If screenshots are blank, choose **Watch browser while scanning** and see if the page shows bot protection, a consent wall, client-side rendering issues, or a navigation redirect. Capture logs explain which visits failed and why. Try a longer render wait. A non-white error or loading page may still need manual inspection.
 
-The old `analysis.py` file is retained for compatibility but is **not imported or used** by the MVP.
+The old DOM-analysis module has been removed from the MVP.
