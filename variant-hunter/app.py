@@ -80,7 +80,7 @@ def capture(browser, url, index, folder, delay, width, height, accept_consent):
                                 animations="allow", timeout=30000)
                 record["image"] = file_name
                 record["blank"] = blank_image(image_path)
-                record["status"] = "blank" if record["blank"] else "captured"
+                record["status"] = "blocked" if record.get("http_status") == 403 else ("blank" if record["blank"] else "captured")
                 record["final_url"] = page.url
                 break
             except Exception as exc:
@@ -123,6 +123,9 @@ def scan(url, visits, delay, width, height, accept, show_browser):
                     record = {"visit": number, "status": "failed", "error": str(exc), "attempts": []}
                 results.append(record)
                 progress.progress(number / visits)
+                if record.get("http_status") == 403:
+                    st.warning("HTTP 403: the site rejected this automated visit. Scan stopped to avoid repeated blocked requests.")
+                    break
         finally:
             browser.close()
     report = {"url": url, "created_at": datetime.now(timezone.utc).isoformat(),
@@ -172,14 +175,16 @@ results = report["results"]
 success = [r for r in results if r.get("status") == "captured" and
            r.get("image") and (folder / r["image"]).is_file()]
 blank = [r for r in results if r.get("status") == "blank"]
+blocked = [r for r in results if r.get("status") == "blocked"]
 failed = [r for r in results if r.get("status") == "failed"]
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Captured", len(success))
 c2.metric("Blank", len(blank))
 c3.metric("Failed", len(failed))
+c4.metric("Blocked (403)", len(blocked))
 st.caption(f"URL: {report['url']}")
 
-if blank or failed:
+if blank or failed or blocked:
     with st.expander("Capture problems (including blank screenshots)", expanded=True):
         st.json([r for r in results if r.get("status") != "captured"], expanded=True)
         for r in blank:
