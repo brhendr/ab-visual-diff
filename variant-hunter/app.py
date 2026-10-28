@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-import numpy as np
 import streamlit as st
 from PIL import Image, ImageChops, ImageEnhance
 from playwright.sync_api import sync_playwright
@@ -29,13 +28,13 @@ def validate_url(value):
     return value
 
 def digest(image):
-    x=np.asarray(image.convert('L').resize((17,16),Image.Resampling.LANCZOS),dtype=np.int16)
-    return ''.join('1' if b else '0' for b in (x[:,1:]>x[:,:-1]).flat)
+    pixels=list(image.convert('L').resize((17,16),Image.Resampling.LANCZOS).getdata())
+    return ''.join('1' if pixels[row*17+col+1]>pixels[row*17+col] else '0' for row in range(16) for col in range(16))
 
 def hamming(a,b):
     return sum(x!=y for x,y in zip(a,b))
 
-def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_animations,scroll):
+def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_animations,ignore_media,scroll):
     ctx=browser.new_context(viewport={'width':width,'height':height},device_scale_factor=1,
                             locale='en-US',color_scheme='light',reduced_motion='reduce')
     page=ctx.new_page()
@@ -50,6 +49,15 @@ def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_ani
         if disable_animations:
             page.add_style_tag(content='*,*::before,*::after{animation-duration:0s!important;transition-duration:0s!important;caret-color:transparent!important}')
         page.wait_for_timeout(int(delay*1000))
+        if ignore_media:
+            page.evaluate("""() => {
+                document.querySelectorAll('video').forEach(v => {try {v.pause()} catch (_) {}});
+            }""")
+            page.add_style_tag(content="""
+                video, img[src*=".gif" i], picture source[srcset*=".gif" i] {
+                    visibility: hidden !important;
+                }
+            """)
         item['final_url']=page.url
         item['title']=page.title()
         item['elements']=page.evaluate(DOM_CAPTURE)
@@ -80,7 +88,7 @@ def cluster(visits,threshold):
         else:groups.append([visit])
     return sorted(groups,key=len,reverse=True)
 
-def run_scan(url,n,width,height,delay,full_page,animations,scroll,threshold,headless,restart):
+def run_scan(url,n,width,height,delay,full_page,animations,ignore_media,scroll,threshold,headless,restart):
     folder=RUNS/datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     folder.mkdir(parents=True,exist_ok=True)
     progress=st.progress(0)
@@ -94,7 +102,7 @@ def run_scan(url,n,width,height,delay,full_page,animations,scroll,threshold,head
                 message.write(f'Visit {index} of {n}…')
                 if restart:browser=playwright.chromium.launch(headless=headless)
                 try:
-                    visits.append(scan_visit(browser,url,index,folder,width,height,delay,full_page,animations,scroll))
+                    visits.append(scan_visit(browser,url,index,folder,width,height,delay,full_page,animations,ignore_media,scroll))
                 finally:
                     if restart:
                         browser.close()
@@ -105,7 +113,7 @@ def run_scan(url,n,width,height,delay,full_page,animations,scroll,threshold,head
     groups=cluster(visits,threshold)
     report={'format_version':3,'url':url,'created_at':datetime.now(timezone.utc).isoformat(),
             'settings':{'visits':n,'viewport':[width,height],'settle_seconds':delay,'full_page':full_page,
-                        'hash_threshold':threshold,'scroll_trigger':scroll,'restart_browser_per_visit':restart},
+                        'hash_threshold':threshold,'scroll_trigger':scroll,'ignore_moving_media':ignore_media,'restart_browser_per_visit':restart},
             'visits':visits,'groups':[[v['visit'] for v in g] for g in groups],
             'dom_comparisons':summarize_groups([[v['visit'] for v in g] for g in groups],{v['visit']:v for v in visits})}
     (folder/'report.json').write_text(json.dumps(report,indent=2))
@@ -123,6 +131,8 @@ with st.sidebar:
     full=st.checkbox('Capture full page',value=False)
     scroll=st.checkbox('Scroll down and back before capture',value=False)
     animations=st.checkbox('Disable CSS animations',value=True)
+    ignore_media=st.checkbox('Exclude videos and animated GIFs',value=True,
+        help='Pause and hide HTML video and GIFs without changing their layout. Canvas animations and embedded video frames may remain.')
     threshold=st.slider('Group similar images (hash distance)',0,80,15)
     restart=st.checkbox('Restart Chromium for every visit',value=False,
         help='Every visit already has fresh cookies and site storage. This additionally restarts the browser process.')
@@ -132,7 +142,7 @@ with st.sidebar:
 if run:
     try:
         with st.spinner('Scanning…'):
-            folder=run_scan(validate_url(raw),visits,int(width),int(height),wait,full,animations,scroll,threshold,headless,restart)
+            folder=run_scan(validate_url(raw),visits,int(width),int(height),wait,full,animations,ignore_media,scroll,threshold,headless,restart)
         st.session_state['last_folder']=str(folder)
     except Exception as error:st.error(f'Scan failed: {error}')
 
@@ -191,9 +201,9 @@ if len(groups)>=2:
     a_col.image(a,use_container_width=True)
     b_col.image(b,use_container_width=True)
     size=(480,360)
-    x=np.asarray(a.resize(size),dtype=np.int16)
-    y=np.asarray(b.resize(size),dtype=np.int16)
-    st.write(f'**Approximate changed-pixel area:** {float(np.mean(np.max(np.abs(x-y),axis=2)>35)*100):.1f}%')
+    pixel_difference=ImageChops.difference(a.resize(size),b.resize(size)).convert('RGB')
+    changed=sum(1 for pixel in pixel_difference.getdata() if max(pixel)>35)
+    st.write(f'**Approximate changed-pixel area:** {100*changed/(size[0]*size[1]):.1f}%')
     with st.expander('Show difference image'):
         dx=ImageChops.difference(a.resize((960,720)),b.resize((960,720)))
         st.image(ImageEnhance.Contrast(dx).enhance(3),use_container_width=True)
@@ -202,8 +212,8 @@ if len(groups)>=2:
     changes=compare_elements(a_visit.get('elements',[]),b_visit.get('elements',[]))
     if changes:
         st.metric('Changed matched elements',sum(c['type']=='modified' for c in changes))
-        st.dataframe([{'Type':c['type'],'Element':c['tag'],'Before':c['before'],
-            'After':c['after'],'Fields':', '.join(c['fields'])} for c in changes],hide_index=True,use_container_width=True)
+        st.json([{'Type':c['type'],'Element':c['tag'],'Before':c['before'],
+            'After':c['after'],'Fields':', '.join(c['fields'])} for c in changes],expanded=False)
         left,right=st.columns(2)
         left.image(highlight_boxes(a,changes,'a'),caption='Baseline: outlined changes',use_container_width=True)
         right.image(highlight_boxes(b,changes,'b'),caption='Alternative: outlined changes',use_container_width=True)
@@ -211,7 +221,7 @@ if len(groups)>=2:
     with st.expander('Repeatability of changed text across visits'):
         for entry in report.get('dom_comparisons',[]):
             st.write(f"Group {entry['group']} vs Group {entry['compared_with']}")
-            if entry['repeatable_changes']:st.dataframe(entry['repeatable_changes'],hide_index=True,use_container_width=True)
+            if entry['repeatable_changes']:st.json(entry['repeatable_changes'],expanded=False)
 else:st.info('Two or more groups are required for DOM comparisons.')
 
 st.subheader('Saved scan evidence')
