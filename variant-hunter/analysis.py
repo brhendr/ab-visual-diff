@@ -2,7 +2,6 @@
 from collections import Counter
 from difflib import SequenceMatcher
 from PIL import Image, ImageChops, ImageEnhance, ImageDraw
-import numpy as np
 
 DOM_CAPTURE = r'''() => {
  const els = document.querySelectorAll('h1,h2,h3,h4,p,a,button,[role="button"],input[type="submit"],label,img');
@@ -71,5 +70,5 @@ def highlight_boxes(img,changes,side='b'):
 def image_difference(a,b):
     w=min(a.width,b.width);h=min(a.height,b.height)
     diff=ImageChops.difference(a.convert('RGB').crop((0,0,w,h)),b.convert('RGB').crop((0,0,w,h)))
-    ratio=float(np.mean(np.max(np.asarray(diff,dtype=np.uint8),axis=2)>35)*100)
+    ratio=100*sum(1 for pixel in diff.getdata() if max(pixel)>35)/(w*h)
     return ratio,ImageEnhance.Contrast(diff).enhance(3)
