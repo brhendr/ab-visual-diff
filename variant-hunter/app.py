@@ -94,25 +94,40 @@ def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_ani
                     visibility: hidden !important;
                 }
             """)
-        item['final_url']=page.url
-        item['title']=page.title()
-        item['cookies_count']=len(ctx.cookies())
-        item['storage_keys']=page.evaluate("""() => {
-            try { return Object.keys(localStorage).slice(0,100) }
-            catch (_) { return [] }
-        }""")
-        item['document_height']=page.evaluate('document.documentElement.scrollHeight')
-        item['elements']=page.evaluate(DOM_CAPTURE)
-        item['framework_hints']=page.evaluate("""() => ({
-            Optimizely:!!window.optimizely,
-            ABTasty:!!window.ABTasty,
-            AdobeTarget:!!window.adobe?.target,
-            VWO:!!window._vwo_code,
-            GrowthBook:!!window.growthbook
-        })""")
+        # Screenshot first: analytics/DOM probing must never prevent capture.
         item['image']=f'visit_{index:03}.png'
-        page.screenshot(path=str(folder/item['image']),full_page=full_page,animations='disabled')
-        with Image.open(folder/item['image']) as im:item['hash']=digest(im)
+        try:
+            page.screenshot(path=str(folder/item['image']),full_page=full_page,
+                            animations='disabled',timeout=20000)
+            with Image.open(folder/item['image']) as im:
+                item['hash']=digest(im)
+            item['captured']=True
+        except Exception as screenshot_error:
+            item['captured']=False
+            item['capture_error']=str(screenshot_error)
+        # Metadata failures are nonfatal and cannot erase saved screenshots.
+        for field,collect in [
+            ('final_url',lambda:page.url),
+            ('title',lambda:page.title()),
+            ('cookies_count',lambda:len(ctx.cookies())),
+            ('storage_keys',lambda:page.evaluate("""() => {
+                try { return Object.keys(localStorage).slice(0,100) }
+                catch (_) { return [] }
+            }""")),
+            ('document_height',lambda:page.evaluate('document.documentElement.scrollHeight')),
+            ('elements',lambda:page.evaluate(DOM_CAPTURE)),
+            ('framework_hints',lambda:page.evaluate("""() => ({
+                Optimizely:!!window.optimizely,
+                ABTasty:!!window.ABTasty,
+                AdobeTarget:!!window.adobe?.target,
+                VWO:!!window._vwo_code,
+                GrowthBook:!!window.growthbook
+            })"""))
+        ]:
+            try:
+                item[field]=collect()
+            except Exception as metadata_error:
+                item.setdefault('diagnostic_errors',{})[field]=str(metadata_error)
     except Exception as error:
         item['error']=str(error)
     finally:
@@ -122,7 +137,7 @@ def scan_visit(browser,url,index,folder,width,height,delay,full_page,disable_ani
 def cluster(visits,threshold):
     groups=[]
     for visit in visits:
-        if visit.get('error') or not visit.get('hash'):continue
+        if not visit.get('hash'):continue
         for group in groups:
             if hamming(visit['hash'],group[0]['hash'])<=threshold:
                 group.append(visit)
@@ -215,18 +230,22 @@ if not (folder/'report.json').exists():
     st.stop()
 report=json.loads((folder/'report.json').read_text())
 items=report['visits']
-valid=[v for v in items if not v.get('error')]
+valid=[v for v in items if v.get('image') and (folder/v['image']).is_file()]
 by_id={v['visit']:v for v in items}
-groups=[[by_id[i] for i in ids] for ids in report['groups']]
+groups=[[by_id[i] for i in ids if i in by_id and by_id[i] in valid] for ids in report['groups']]
+groups=[g for g in groups if g]
 c1,c2,c3=st.columns(3)
 c1.metric('Successful visits',f'{len(valid)} / {len(items)}')
 c2.metric('Visual groups',len(groups))
 c3.metric('Potential alternatives',max(len(groups)-1,0))
-if not valid:st.error('No successful captures. Site automation may be blocked or the page may be unreachable.')
+if not valid:
+    st.error('No screenshots were captured. Check the capture errors below; this is a scanner failure, not evidence that no test exists.')
+    st.json([{'visit':v.get('visit'),'error':v.get('error'),'capture_error':v.get('capture_error'),
+              'diagnostic_errors':v.get('diagnostic_errors')} for v in items],expanded=True)
 elif len(groups)==1:st.success('One visual group found. This does not rule out active experiments.')
 else:st.warning('Multiple visual groups detected. Check for experiments versus dynamic page content.')
 for v in items:
-    if v.get('error'):st.caption(f"Visit {v['visit']}: {v['error']}")
+    if v.get('error') or v.get('capture_error'):st.caption(f"Visit {v['visit']}: {v.get('error') or v.get('capture_error')}")
 
 st.subheader('Visit diagnostics')
 st.caption('Each captured visit is shown independently, even when grouped with other screenshots. Grouping cannot discard a capture.')
@@ -246,7 +265,8 @@ with st.expander('Raw visit details (assignment and targeting clues)'):
               'storage_keys':v.get('storage_keys'),
               'consent':v.get('consent'),
               'framework_hints':v.get('framework_hints'),
-              'error':v.get('error')} for v in items],expanded=False)
+              'error':v.get('error'),'capture_error':v.get('capture_error'),
+              'diagnostic_errors':v.get('diagnostic_errors')} for v in items],expanded=False)
 
 st.subheader('Visual groups')
 if groups:
