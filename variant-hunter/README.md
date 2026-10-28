@@ -1,13 +1,12 @@
-# Variant Hunter
+# Variant Hunter — Screenshot MVP
 
-Local visual A/B-test discovery using Streamlit and Playwright. This is the Python scanner, separate from the JavaScript prototype in the repository root.
+A deliberately minimal, local A/B-test investigation tool. It opens a page as independent browser visitors and saves screenshots. It **does not** claim to detect tests automatically.
 
-## Installation
+## Start
 
-From the repository root:
+From the `variant-hunter` directory:
 
 ```bash
-cd variant-hunter
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -15,16 +14,31 @@ python -m playwright install chromium
 python -m streamlit run app.py
 ```
 
-## Updating
+## Update
 
-From the repository root run `git pull`, then restart Streamlit. Scan evidence remains under `variant-hunter/runs/` and is intentionally ignored by Git.
+```bash
+git pull
+python -m streamlit run app.py
+```
 
-Each visit runs in a new Playwright browser context (fresh cookies and storage), with an optional fresh Chromium process. Screenshots are visually grouped, while visible text, links, images, and element bounding boxes are compared between representative visits. Scan evidence is saved locally for review. Identifying different experiences does **not** prove an experiment exists, and identical captures do **not** rule one out.
+## Use
 
-Use responsibly on public pages; don't circumvent access controls or aggressively scan websites.
+1. Start with **3 visits** and **Watch browser while scanning** enabled if you have seen blank screenshots.
+2. Check the Captured, Blank, and Failed counts. Blank captures are retried and surfaced, not silently treated as valid.
+3. Run **10 or 20 visits** once capture succeeds.
+4. Compare any two successful screenshots or export the evidence ZIP.
 
-## Video and animation handling
+## Important behavior
 
-The scan setting **Exclude videos and animated GIFs** (on by default) pauses/hides HTML video and GIF content without collapsing the layout. CSS animations can also be disabled. Canvas animations and some embedded frames can remain.
+- Each visit has fresh cookies and browser storage via a new Playwright context, but **shares the same public IP**.
+- The app makes no determination that different screenshots represent an A/B test.
+- Click-to-accept consent is opt-in, since it can affect which scripts run.
+- Video backgrounds and other dynamic content can produce differences. The MVP does not mask or remove them.
+- Saved scans are stored in `runs/` (ignored by Git).
+- This tool is not a proxy for testing platform assignment or experiment eligibility. Test discovery is not guaranteed.
 
-The app no longer uses NumPy or pandas to render scan differences. If your global Python environment has a binary incompatibility, follow the virtual environment setup above to install an isolated environment.
+## Troubleshooting
+
+If screenshots are blank, choose **Watch browser while scanning** and see if the page shows bot protection, a consent wall, client-side rendering issues, or a navigation redirect. Capture logs explain which visits failed and why. Try a longer render wait. A non-white error or loading page may still need manual inspection.
+
+The old `analysis.py` file is retained for compatibility but is **not imported or used** by the MVP.
