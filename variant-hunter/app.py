@@ -41,54 +41,70 @@ def blank_image(image_path):
 
 def capture(browser, url, index, folder, delay, width, height, accept_consent):
     record = {"visit": index, "status": "failed", "attempts": []}
-    # A new context creates fresh cookies/localStorage/sessionStorage each visit.
     context = browser.new_context(viewport={"width": width, "height": height},
                                   device_scale_factor=1, color_scheme="light")
     page = context.new_page()
     page.set_default_timeout(12000)
     try:
-        for attempt in range(1, 3):
-            attempt_info = {"attempt": attempt}
+        # Navigation errors should not suppress evidence: an error page is useful to see.
+        try:
+            response = page.goto(url, wait_until="commit", timeout=30000)
+            record["http_status"] = response.status if response else None
+        except Exception as exc:
+            record["navigation_error"] = str(exc)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=12000)
+        except Exception:
+            pass
+        page.wait_for_timeout(int(delay * 1000))
+        if accept_consent:
+            for name in ("Accept All Cookies", "Accept all cookies", "Accept All",
+                         "Allow all", "Accept all", "I Accept"):
+                try:
+                    button = page.get_by_role("button", name=name, exact=True).first
+                    if button.count() and button.is_visible():
+                        button.click(timeout=1500)
+                        page.wait_for_timeout(1000)
+                        record["consent_clicked"] = name
+                        break
+                except Exception:
+                    continue
+
+        file_name = f"visit_{index:03}.png"
+        image_path = folder / file_name
+        # Do not ask Playwright to wait for animations to finish. Dynamic sites
+        # can otherwise time out before we save any screenshot at all.
+        for attempt in (1, 2):
             try:
-                response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                attempt_info["http_status"] = response.status if response else None
-                # Some SPAs paint after DOMContentLoaded; waiting for body alone isn't sufficient.
-                page.locator("body").wait_for(state="visible", timeout=12000)
-                page.wait_for_timeout(int(delay * 1000))
-                if accept_consent:
-                    for name in ["Accept All Cookies", "Accept all cookies", "Accept All",
-                                 "Allow all", "Accept all", "I Accept"]:
-                        try:
-                            button = page.get_by_role("button", name=name, exact=True).first
-                            if button.count() and button.is_visible():
-                                button.click(timeout=1500)
-                                page.wait_for_timeout(1500)
-                                attempt_info["consent"] = name
-                                break
-                        except Exception:
-                            continue
-                file_name = f"visit_{index:03}.png"
-                image_path = folder / file_name
                 page.screenshot(path=str(image_path), full_page=False,
-                                animations="disabled", timeout=20000)
-                attempt_info["blank"] = blank_image(image_path)
-                attempt_info["url"] = page.url
-                attempt_info["file"] = file_name
-                record["attempts"].append(attempt_info)
+                                animations="allow", timeout=30000)
                 record["image"] = file_name
-                record["status"] = "blank" if attempt_info["blank"] else "captured"
-                if record["status"] == "captured":
-                    return record
-                # Retry after longer rendering, retaining the same fresh visitor context.
-                page.wait_for_timeout(2500)
+                record["blank"] = blank_image(image_path)
+                record["status"] = "blank" if record["blank"] else "captured"
+                record["final_url"] = page.url
+                break
             except Exception as exc:
-                attempt_info["error"] = str(exc)
-                record["attempts"].append(attempt_info)
-                record["status"] = "failed"
+                record["attempts"].append({"attempt": attempt, "error": str(exc)})
+                if attempt == 1:
+                    page.wait_for_timeout(2000)
+
+        if "image" not in record:
+            # Capture a fallback through Chromium's CDP, bypassing Playwright's
+            # screenshot stabilization and animation handling.
+            try:
+                import base64
+                cdp = context.new_cdp_session(page)
+                payload = cdp.send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
+                image_path.write_bytes(base64.b64decode(payload["data"]))
+                record["image"] = file_name
+                record["blank"] = blank_image(image_path)
+                record["status"] = "blank" if record["blank"] else "captured"
+                record["capture_method"] = "cdp_fallback"
+            except Exception as exc:
+                record["fallback_error"] = str(exc)
         return record
     finally:
         context.close()
-
 
 def scan(url, visits, delay, width, height, accept, show_browser):
     folder = RUNS / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
@@ -164,21 +180,23 @@ c3.metric("Failed", len(failed))
 st.caption(f"URL: {report['url']}")
 
 if blank or failed:
-    with st.expander("Capture problems (including blank screenshots)", expanded=not success):
+    with st.expander("Capture problems (including blank screenshots)", expanded=True):
         st.json([r for r in results if r.get("status") != "captured"], expanded=True)
         for r in blank:
             path = folder / r.get("image", "")
             if path.is_file():
                 st.image(str(path), caption=f"Blank capture — visit {r['visit']}", width=360)
 
-st.subheader("Every captured visit")
-if success:
-    for i in range(0, len(success), 3):
+st.subheader("Every saved screenshot")
+images = [r for r in results if r.get("image") and (folder / r["image"]).is_file()]
+st.caption(f"{len(images)} image files saved on disk (including blank/error pages).")
+if images:
+    for i in range(0, len(images), 3):
         cols = st.columns(3)
-        for col, record in zip(cols, success[i:i+3]):
+        for col, record in zip(cols, images[i:i+3]):
             with col:
                 st.image(str(folder / record["image"]), use_container_width=True)
-                st.caption(f"Visit {record['visit']}")
+                st.caption(f"Visit {record['visit']} — {record['status']}")
 else:
     st.warning("No usable screenshots. Try 'Watch browser while scanning' to see what the site actually displays.")
 
